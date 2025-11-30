@@ -148,7 +148,7 @@ export function transpiler(input, options = {}) {
         return this.replace(labelToP(node));
       }
     },
-    leave(node, parent, prop, index) {},
+    leave(node, parent, prop, index) { },
   });
 
   let { body } = ast;
@@ -162,21 +162,30 @@ export function transpiler(input, options = {}) {
         name: 'silence',
       },
     });
-  } else if (!body?.[body.length - 1]?.expression) {
-    throw new Error('unexpected ast format without body expression');
+  } else if (addReturn && !body?.[body.length - 1]?.expression) {
+    // If last statement is not an expression (e.g., just variable declarations from exports),
+    // and we need to add return, add silence
+    console.warn('no expression to return -> fallback to silence');
+    body.push({
+      type: 'ExpressionStatement',
+      expression: {
+        type: 'Identifier',
+        name: 'silence',
+      },
+    });
   }
 
   // add return to last statement
-  if (addReturn) {
+  if (addReturn && body.length > 0 && body[body.length - 1].expression) {
     const { expression } = body[body.length - 1];
     body[body.length - 1] = {
       type: 'ReturnStatement',
       argument: expression,
     };
   }
-  
+
   let output = escodegen.generate(ast);
-  
+
   // Process imports if there are any
   if (imports.length > 0 && options.onImport) {
     // Pass imports to handler for external resolution
@@ -189,7 +198,7 @@ export function transpiler(input, options = {}) {
     }));
     options.onImport(importInfo);
   }
-  
+
   if (wrapAsync) {
     output = `(async ()=>{${output}})()`;
   }
@@ -394,74 +403,74 @@ export async function transpileWithImports(code, fileLoader, options = {}) {
     // No imports, just transpile normally
     return transpiler(code, options);
   }
-  
+
   // Track module exports for imported files
   const moduleExports = new Map();
-  
+
   // Helper to resolve and load a module
   async function loadModule(modulePath) {
     if (moduleCache.has(modulePath)) {
       return moduleCache.get(modulePath);
     }
-    
+
     if (!fileLoader) {
       throw new Error('No file loader registered. Call registerFileLoader() first.');
     }
-    
+
     const moduleCode = await fileLoader(modulePath);
     const result = await transpileWithImports(moduleCode, fileLoader, { ...options, addReturn: false });
-    
+
     moduleCache.set(modulePath, result);
     return result;
   }
-  
+
   // First pass: transpile to get import info
-  const firstPass = transpiler(code, { ...options, onImport: () => {} });
-  
+  const firstPass = transpiler(code, { ...options, onImport: () => { } });
+
   if (!firstPass.imports || firstPass.imports.length === 0) {
     return firstPass;
   }
-  
+
   // Load all imported modules
   const importPromises = firstPass.imports.map(async (importNode) => {
     const modulePath = importNode.source.value;
     const module = await loadModule(modulePath);
     return { modulePath, module, node: importNode };
   });
-  
+
   const loadedModules = await Promise.all(importPromises);
-  
+
   // Build import prefix code
   let importCode = '';
   loadedModules.forEach(({ modulePath, module, node }) => {
     // Store exports for this module
     moduleExports.set(modulePath, module.exports || {});
-    
+
     // For each imported specifier, create a variable
     node.specifiers.forEach(spec => {
       const importedName = spec.imported?.name || 'default';
       const localName = spec.local.name;
-      
+
       // Check if the export exists
       if (module.exports && !module.exports[importedName]) {
         console.warn(`Warning: '${importedName}' is not exported from '${modulePath}'`);
       }
-      
+
       importCode += `const ${localName} = globalThis.__strudelModules__['${modulePath}'].${importedName};\n`;
     });
   });
-  
+
   // Inject loaded module code and exports into global scope
   let preamble = '';
   loadedModules.forEach(({ modulePath, module }) => {
     if (!module.exports || Object.keys(module.exports).length === 0) {
       return;
     }
-    
+
     preamble += `if (!globalThis.__strudelModules__) globalThis.__strudelModules__ = {};\n`;
     preamble += `if (!globalThis.__strudelModules__['${modulePath}']) {\n`;
     preamble += `  globalThis.__strudelModules__['${modulePath}'] = {};\n`;
-    
+
     // Execute the module code to populate exports
     preamble += `  (function() {\n`;
     preamble += `    ${module.output}\n`;
@@ -471,10 +480,10 @@ export async function transpileWithImports(code, fileLoader, options = {}) {
     preamble += `  })();\n`;
     preamble += `}\n`;
   });
-  
+
   // Combine: preamble + imports + original code (without import statements)
   const finalOutput = preamble + importCode + firstPass.output;
-  
+
   return {
     ...firstPass,
     output: finalOutput,
